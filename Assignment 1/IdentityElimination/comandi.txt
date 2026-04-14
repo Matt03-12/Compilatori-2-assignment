@@ -1,0 +1,5 @@
+clang++ -fPIC -shared IdentityEliminationPass.cpp -o libIdentityElimination.so `llvm-config --cxxflags --ldflags --system-libs --libs core passes`
+
+opt -load-pass-plugin ./libIdentityElimination.so     -passes=identity-elimination     -S test/test.ll     -o test/output.ll
+
+

@@ -4,7 +4,6 @@ entry:
   %c = sub i32 %a, 5
   ret i32 %c
 }
-; CHECK: ret i32 %b
 
 
 define i32 @sub_add(i32 %b) {
@@ -13,7 +12,6 @@ entry:
   %c = add i32 %a, 3
   ret i32 %c
 }
-; CHECK: ret i32 %b
 
 
 define i32 @mul_div(i32 %b) {
@@ -22,14 +20,11 @@ entry:
   %c = sdiv i32 %a, 4
   ret i32 %c
 }
-; CHECK: ret i32 %b
 
 
-; ❌ NON deve ottimizzare
 define i32 @div_mul(i32 %b) {
 entry:
   %a = sdiv i32 %b, 2
   %c = mul i32 %a, 2
   ret i32 %c
 }
-; CHECK: mul i32

@@ -1,0 +1,4 @@
+clang++ -fPIC -shared StrengthReductionPass.cpp -o libStrengthReduction.so `llvm-config --cxxflags --ldflags --system-libs --libs core passes`
+
+opt -load-pass-plugin ./libStrengthReduction.so     -passes=strength-reduction     -S test/test.ll     -o test/output.ll
+

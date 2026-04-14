@@ -1,4 +1,4 @@
 clang++ -fPIC -shared MultiInstOpts.cpp -o libMultiInstOpts.so `llvm-config --cxxflags --ldflags --system-libs --libs core passes`
 
-opt -load-pass-plugin ./libMultiInstOpts.so     -passes=multi-inst-opt     -S test/testmlo1.ll     -o test/output.ll
+opt -load-pass-plugin ./libMultiInstOpts.so     -passes=multi-inst-opt     -S test/test.ll     -o test/output.ll
 
