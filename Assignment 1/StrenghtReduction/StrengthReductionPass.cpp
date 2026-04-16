@@ -62,8 +62,7 @@ struct StrengthReductionPass : PassInfoMixin<StrengthReductionPass> {
 
         Instruction &I = *It++;
 
-        if (I.getOpcode() != Instruction::Mul)
-          continue;
+        if (I.getOpcode() == Instruction::Mul){
 
         // --- Individua operando variabile e costante ------------------------
         Value *Variable = nullptr;
@@ -147,7 +146,99 @@ struct StrengthReductionPass : PassInfoMixin<StrengthReductionPass> {
         I.eraseFromParent();
         Changed = true;
       }
+      
+      
+      //div
+       if (I.getOpcode() == Instruction::SDiv || I.getOpcode() == Instruction::UDiv) {
+
+        // --- Individua operando variabile e costante ------------------------
+        Value *Variable = nullptr;
+        ConstantInt *CI = nullptr;
+
+        if (auto *C = dyn_cast<ConstantInt>(I.getOperand(1))) {
+          Variable = I.getOperand(0);
+          CI = C;
+        } else if (auto *C = dyn_cast<ConstantInt>(I.getOperand(0))) {
+          Variable = I.getOperand(1);
+          CI = C;
+        }
+
+        if (!CI)
+          continue;
+
+        int64_t Divider = CI->getSExtValue();
+        Type *Ty = I.getType();
+        IRBuilder<> Builder(&I);
+
+    
+        // --- x / 0  →  undefined beyavour ---------------------------------------------------
+        if (Divider == 0) {
+          continue;
+        }
+
+        // --- x / 1  →  x ---------------------------------------------------
+        if (Divider == 1) {
+        I.replaceAllUsesWith(Variable);
+        I.eraseFromParent();
+        Changed = true;
+        continue;
+        }
+
+        // --- x / -1  →  0 - x ----------------------------------------------
+       
+        if (Divider == -1 && I.getOpcode() == Instruction::SDiv) {
+          Value *Neg = Builder.CreateNeg(Variable, "neg");
+          I.replaceAllUsesWith(Neg);
+          I.eraseFromParent();
+          Changed = true;
+          continue;
+        }
+
+        // --- Gestione segno -------------------------------------------------
+          bool IsNegative = (Divider < 0) && (I.getOpcode() == Instruction::SDiv);
+
+        uint64_t AbsDiv =
+            static_cast<uint64_t>(IsNegative ? -Divider : Divider);
+
+        // --- Potenza di 2 → shift ----------------------------------------
+        if (AbsDiv > 0 && (AbsDiv & (AbsDiv - 1)) == 0) {
+
+          unsigned ShiftAmt = 0;
+          uint64_t Tmp = AbsDiv;
+
+          while (Tmp > 1) {
+            Tmp >>= 1;
+            ShiftAmt++;
+          }
+
+          Value *Shifted = nullptr;
+
+          if (I.getOpcode() == Instruction::UDiv) {
+            // unsigned
+            Shifted = Builder.CreateLShr(
+                Variable, ConstantInt::get(Ty, ShiftAmt), "lshr.div");
+          } else {
+            // signed
+            Shifted = Builder.CreateAShr(
+                Variable, ConstantInt::get(Ty, ShiftAmt), "ashr.div");
+          }
+
+          // gestione segno
+          Value *Result =
+              IsNegative ? Builder.CreateNeg(Shifted, "neg") : Shifted;
+
+          I.replaceAllUsesWith(Result);
+          I.eraseFromParent();
+          Changed = true;
+          continue;
+        }
+        continue;
+
+       
+      }
     }
+    }
+    
 
     return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
   }

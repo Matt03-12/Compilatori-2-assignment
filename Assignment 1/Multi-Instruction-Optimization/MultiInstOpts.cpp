@@ -31,9 +31,12 @@ struct MultiInstOptPass : public PassInfoMixin<MultiInstOptPass> {
           for (auto *U : Users) {
             if (auto *Sub = dyn_cast<BinaryOperator>(U)) {
 
+              
               if (Sub->getOpcode() == Instruction::Sub &&
-                  Sub->getOperand(0) == &I &&
-                  Sub->getOperand(1) == C) {
+                  Sub->getOperand(0) == &I) {
+
+              if (auto *C2 = dyn_cast<ConstantInt>(Sub->getOperand(1))) {
+              if (C2 == C) {
 
                 Sub->replaceAllUsesWith(B);
                 ToErase.push_back(Sub);
@@ -42,7 +45,8 @@ struct MultiInstOptPass : public PassInfoMixin<MultiInstOptPass> {
             }
           }
         }
-
+      }
+    }
     
         // a = b - C  →  c = a + C
         if (match(&I, m_Sub(m_Value(B), m_ConstantInt(C)))) {
@@ -71,7 +75,7 @@ struct MultiInstOptPass : public PassInfoMixin<MultiInstOptPass> {
 
           // controllo overflow
           if (auto *Mul = dyn_cast<BinaryOperator>(&I)) {
-            if (!Mul->hasNoSignedWrap())
+            if (Mul->hasNoSignedWrap())
               continue;
           }
 
