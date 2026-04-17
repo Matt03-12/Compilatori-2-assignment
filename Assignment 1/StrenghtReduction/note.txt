@@ -1,0 +1,5 @@
+In questo passo ottimizziamo una divisione solamente se si divide per 1,0,-1
+oppure una potenza di 2
+negli altri casi dovremmo fare (x * M) >> s
+con M un numero calcolato approssimatamente 
+ma questo introdurebbe problemi con il segno e di overflow

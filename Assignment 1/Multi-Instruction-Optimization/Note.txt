@@ -1,0 +1,8 @@
+moltiplicare per 0 e poi dividere per 0 è rischioso 
+per cui è un caso che è stato ignorato
+
+un altro caso che non è stato ottimizzato ma è stato valutato è 
+a=b+N
+c=a-N1
+d=c-N2
+con N1+N2=N
