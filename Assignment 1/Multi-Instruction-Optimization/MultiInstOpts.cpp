@@ -23,7 +23,7 @@ struct MultiInstOptPass : public PassInfoMixin<MultiInstOptPass> {
         ConstantInt *C;
 
   
-        // a = b + C  →  c = a - C
+        // a = b + C  ->  c = a - C
         if (match(&I, m_c_Add(m_Value(B), m_ConstantInt(C)))) {
 
           SmallVector<User*, 4> Users(I.users());
@@ -48,7 +48,7 @@ struct MultiInstOptPass : public PassInfoMixin<MultiInstOptPass> {
       }
     }
     
-        // a = b - C  →  c = a + C
+        // a = b - C  ->  c = a + C
         if (match(&I, m_Sub(m_Value(B), m_ConstantInt(C)))) {
 
           SmallVector<User*, 4> Users(I.users());
@@ -67,7 +67,7 @@ struct MultiInstOptPass : public PassInfoMixin<MultiInstOptPass> {
           }
         }
 
-        // a = b * C  →  c = a / C
+        // a = b * C  ->  c = a / C
         if (match(&I, m_c_Mul(m_Value(B), m_ConstantInt(C)))) {
 
           if (C->isZero())
