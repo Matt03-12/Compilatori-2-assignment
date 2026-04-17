@@ -1,0 +1,6 @@
+casi non ottimizzati:
+x mul 0 = 0
+x and -1 = x
+x and 0 = 0
+x or x = 0
+x - x = 0

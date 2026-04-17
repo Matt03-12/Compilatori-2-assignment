@@ -148,7 +148,7 @@ struct StrengthReductionPass : PassInfoMixin<StrengthReductionPass> {
       }
       
       
-      //div
+        // sostituzione della divisione
        if (I.getOpcode() == Instruction::SDiv || I.getOpcode() == Instruction::UDiv) {
 
         // --- Individua operando variabile e costante ------------------------
