@@ -7,7 +7,9 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
+#include "llvm/ADT/SmallVector.h"
 #include <map>
 #include <set>
 #include <vector>
@@ -17,9 +19,9 @@ using namespace llvm;
 
 namespace {
 
-
-//  Dominance Tree
-//  Nodo del dominance tree: BB, iDom, figli
+// ============================================================
+//  Dominance Tree (immutato rispetto alla tua versione)
+// ============================================================
 struct MyDomNode {
   BasicBlock               *BB;
   BasicBlock               *IDom;      // immediate dominator (nullptr per entry)
@@ -40,10 +42,8 @@ static int intersect(int b1, int b2,
   return b1;
 }
 
-// Costruisce il dominance tree della funzione F tramite RPO + worklist.
 DomTreeMap buildDominanceTree(Function &F)
 {
-  // Calcola l'ordine RPO (reverse post-order) del CFG
   std::vector<BasicBlock *> RPO;
   std::set<BasicBlock *>    Visited;
 
@@ -65,17 +65,14 @@ DomTreeMap buildDominanceTree(Function &F)
 
   int N = (int)RPO.size();
 
-  // Mappa BB -> indice in RPO
   std::map<BasicBlock *, int> RPOIdx;
   for (int i = 0; i < N; i++) RPOIdx[RPO[i]] = i;
 
-  // postOrd[i] valore post-order di RPO[i] (inverso dell'indice RPO)
   std::vector<int> postOrd(N);
   for (int i = 0; i < N; i++) postOrd[i] = N - 1 - i;
 
-  // idom[i] indice dell'immediate dominator di RPO[i] se -1 = non definito
   std::vector<int> idom(N, -1);
-  idom[0] = 0; // l'entry block domina se stesso
+  idom[0] = 0;
 
   bool Changed = true;
   while (Changed) {
@@ -97,7 +94,6 @@ DomTreeMap buildDominanceTree(Function &F)
     }
   }
 
-  // Costruisco la DomTreeMap
   DomTreeMap Tree;
   for (BasicBlock &BB : F) Tree[&BB] = {&BB, nullptr, {}};
 
@@ -115,7 +111,6 @@ DomTreeMap buildDominanceTree(Function &F)
   return Tree;
 }
 
-// Stampa ricorsiva del dominance tree
 void printDomTree(BasicBlock       *Root,
                   const DomTreeMap &Tree,
                   const LoopInfo   &LI,
@@ -149,11 +144,12 @@ void printDomTree(BasicBlock       *Root,
 }
 
 
-// Reaching Definitions
+// ============================================================
+//  Reaching Definitions (immutato)
+// ============================================================
 using DefSet   = std::set<Instruction *>;
 using ReachMap = std::map<Value *, DefSet>;
 
-// Calcola le reaching definitions per ogni BasicBlock tramite analisi forward con worklist.
 void computeReachingDefs(
     Function &F,
     std::map<BasicBlock *, ReachMap> &ReachIN,
@@ -172,14 +168,11 @@ void computeReachingDefs(
     Changed = false;
     for (BasicBlock *BB : Worklist) {
 
-      // IN[BB] = unione degli OUT di tutti i predecessori
       ReachMap NewIN;
       for (BasicBlock *Pred : predecessors(BB))
         for (auto &[Val, Defs] : ReachOUT[Pred])
           NewIN[Val].insert(Defs.begin(), Defs.end());
 
-      // OUT[BB] = GEN[BB] ∪ (IN[BB] filtrato per KILL[BB])
-      // In SSA ogni Value è definito una volta sola, l'ultima def in BB sovrascrive quelle precedenti (gestione non-SSA inclusa).
       ReachMap NewOUT = NewIN;
       for (Instruction &I : *BB)
         if (!I.getType()->isVoidTy())
@@ -196,8 +189,6 @@ void computeReachingDefs(
   }
 }
 
-// Restituisce le reaching defs di V nel punto PRIMA di UseI
-// (IN del suo BB + defs che precedono UseI nello stesso BB).
 DefSet getReachingDefsAtUse(
     Value *V,
     Instruction *UseI,
@@ -213,33 +204,95 @@ DefSet getReachingDefsAtUse(
 
   for (Instruction &I : *BB) {
     if (&I == UseI) break;
-    if (&I == V)    Reaching = {&I}; // def locale sovrascrive
+    if (&I == V)    Reaching = {&I};
   }
 
-  // Argomento di funzione: sempre fuori dal loop, usiamo nullptr
   if (isa<Argument>(V)) Reaching.insert(nullptr);
 
   return Reaching;
 }
 
 
-//  Loop invariant detection
+// ============================================================
+//  Helper LICM: safety check + traversal order
+// ============================================================
+
+// FIX (1): un'istruzione è hoistable se
+//   (a) è safe-to-speculatively-execute (la sua esecuzione anticipata
+//       non può causare trap / observable side effect) OPPURE
+//   (b) il suo BB domina TUTTI gli exit block del loop
+//       (quindi era garantito che venisse eseguita in ogni run del loop).
+static bool isSafeToHoist(Instruction *I, Loop *L, DominatorTree &DT) {
+  if (isSafeToSpeculativelyExecute(I))
+    return true;
+
+  SmallVector<BasicBlock *, 4> ExitBlocks;
+  L->getExitBlocks(ExitBlocks);
+  for (BasicBlock *EB : ExitBlocks)
+    if (!DT.dominates(I->getParent(), EB))
+      return false;
+  return true;
+}
+
+// Conservativo: il loop contiene istruzioni che scrivono in memoria?
+// Usato per decidere se i load possono essere marcati invariant senza
+// alias analysis vera.
+static bool loopMayWriteMemory(Loop *L) {
+  for (BasicBlock *BB : L->blocks())
+    for (Instruction &I : *BB)
+      if (I.mayWriteToMemory())
+        return true;
+  return false;
+}
+
+// FIX (3): raccolta dei BB del loop in DFS pre-order del dominator tree.
+// Garantisce che se A domina B (entrambi nel loop), A appare prima di B.
+// Ne consegue che, hoistando in quest'ordine, ogni def viene mossa
+// prima di ogni suo use => nessun use-before-def nel preheader.
+static void collectLoopBlocksInDomOrder(
+    Loop *L, DominatorTree &DT,
+    std::vector<BasicBlock *> &Out)
+{
+  std::vector<DomTreeNode *> Stack;
+  Stack.push_back(DT.getNode(L->getHeader()));
+  while (!Stack.empty()) {
+    DomTreeNode *N = Stack.back();
+    Stack.pop_back();
+    BasicBlock *BB = N->getBlock();
+    if (!L->contains(BB)) continue;
+    Out.push_back(BB);
+    for (DomTreeNode *Child : *N)
+      Stack.push_back(Child);
+  }
+}
+
+
+// ============================================================
+//  Loop invariant detection (FIX 2: set PER-LOOP)
+// ============================================================
+using PerLoopInvMap = std::map<Loop *, std::set<Instruction *>>;
+
 void detectLoopInvariant(
     Loop *L,
     std::map<BasicBlock *, ReachMap> &ReachIN,
-    std::set<Instruction *> &InvariantSet,
+    PerLoopInvMap &PerLoopInvariants,
     int depth = 0)
 {
   std::string Indent(depth * 2, ' ');
   errs() << Indent << "Loop (header: " << L->getHeader()->getName() << ")\n";
 
-  std::set<BasicBlock *> LoopBlocks(L->block_begin(), L->block_end());
-
-  // Prima i sottloop (bottom-up), così le loro invarianti sono già nell'InvariantSet quando analizziamo il loop corrente.
+  // Bottom-up: prima i sotto-loop. Ognuno ha il proprio set, indipendente.
   for (Loop *SubL : L->getSubLoops())
-    detectLoopInvariant(SubL, ReachIN, InvariantSet, depth + 1);
+    detectLoopInvariant(SubL, ReachIN, PerLoopInvariants, depth + 1);
 
-  // Punto fisso: ripetiamo finché non troviamo nuove invarianti
+  std::set<BasicBlock *> LoopBlocks(L->block_begin(), L->block_end());
+  std::set<Instruction *> &InvariantSet = PerLoopInvariants[L];
+
+  // FIX (4): determino una volta se il loop scrive in memoria.
+  // Se sì, niente load nell'invariant set (criterio conservativo
+  // in assenza di alias analysis).
+  bool LoopWrites = loopMayWriteMemory(L);
+
   bool Changed = true;
   while (Changed) {
     Changed = false;
@@ -252,11 +305,13 @@ void detectLoopInvariant(
         if (isa<CallBase>(I))          continue;
         if (I.getType()->isVoidTy())   continue;
 
+        // load: solo se nel loop non c'è nessuno store / call con side effect
+        if (isa<LoadInst>(I) && LoopWrites) continue;
+
         bool AllInvariant = true;
         for (Use &U : I.operands()) {
           Value *Op = U.get();
 
-          // Costanti e argomenti sono sempre invarianti
           if (isa<Constant>(Op) || isa<Argument>(Op)) continue;
 
           DefSet Defs = getReachingDefsAtUse(Op, &I, ReachIN);
@@ -282,7 +337,6 @@ void detectLoopInvariant(
     }
   }
 
-  // Stampa le istruzioni NON invarianti
   errs() << Indent << "  Istruzioni Non-invariant:\n";
   for (BasicBlock *BB : LoopBlocks) {
     for (Instruction &I : *BB) {
@@ -298,7 +352,9 @@ void detectLoopInvariant(
 }
 
 
+// ============================================================
 //  Pass principale
+// ============================================================
 struct TestPass : PassInfoMixin<TestPass> {
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
@@ -308,7 +364,7 @@ struct TestPass : PassInfoMixin<TestPass> {
     LoopInfo      &LI = AM.getResult<LoopAnalysis>(F);
     DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
 
-    // dominance tree
+    // --- dominance tree (custom) ---
     errs() << "\n=== Dominance Tree ===\n";
     DomTreeMap OurDomTree = buildDominanceTree(F);
     printDomTree(&F.getEntryBlock(), OurDomTree, LI, 0);
@@ -321,9 +377,8 @@ struct TestPass : PassInfoMixin<TestPass> {
       else           errs() << "(nessun dom — entry block)";
       errs() << "\n";
     }
-    
 
-    // Reaching definitions
+    // --- reaching definitions ---
     errs() << "\n=== Reaching Definitions ===\n";
     std::map<BasicBlock *, ReachMap> ReachIN, ReachOUT;
     computeReachingDefs(F, ReachIN, ReachOUT);
@@ -345,49 +400,63 @@ struct TestPass : PassInfoMixin<TestPass> {
       }
     }
 
-    //  Loop-invariants detection
+    // --- loop-invariant detection (PER-LOOP) ---
     errs() << "\n=== Loop-Invariant Analysis ===\n";
-    std::set<Instruction *> InvariantSet;
+    PerLoopInvMap PerLoopInvariants;
     if (LI.empty()) {
       errs() << "  No loops found.\n";
     } else {
       for (Loop *L : LI)
-        detectLoopInvariant(L, ReachIN, InvariantSet, 0);
-      errs() << " Istruzioni loop-invariant: "
-             << InvariantSet.size() << "\n";
+        detectLoopInvariant(L, ReachIN, PerLoopInvariants, 0);
+
+      size_t Tot = 0;
+      for (auto &P : PerLoopInvariants) Tot += P.second.size();
+      errs() << " Istruzioni loop-invariant totali (somma per-loop): "
+             << Tot << "\n";
     }
 
+    // --- hoisting (inner-first) con safety check + dom-order traversal ---
     auto Loops = LI.getLoopsInPreorder();
     for (Loop *L : reverse(Loops)) {
 
-      // Ottieni il preheader
-      BasicBlock *Preheader;
-      if ((Preheader = L->getLoopPreheader()) == nullptr)
+      BasicBlock *Preheader = L->getLoopPreheader();
+      if (Preheader == nullptr) {
         Preheader = InsertPreheaderForLoop(L, &DT, &LI, nullptr, false);
+        // DT è aggiornato da InsertPreheaderForLoop
+      }
 
-      for (auto &BB : L->getBlocks()) {
+      auto It = PerLoopInvariants.find(L);
+      if (It == PerLoopInvariants.end()) continue;
+      std::set<Instruction *> &LInvariants = It->second;
+      if (LInvariants.empty()) continue;
+
+      // BB del loop in DFS pre-order del dom tree
+      std::vector<BasicBlock *> BBsInOrder;
+      collectLoopBlocksInDomOrder(L, DT, BBsInOrder);
+
+      for (BasicBlock *BB : BBsInOrder) {
         SmallVector<Instruction *, 16> ToHoist;
-        while (true) {
-          for (auto &I : *BB) {
-            if (I.isTerminator())                    continue;
-            if (isa<PHINode>(I))                     continue;
-            if (I.mayHaveSideEffects())              continue;
-            if (!InvariantSet.count(&I))             continue;
-            //errs() << "l'istruzione sta per essere mossa\n";
-            ToHoist.push_back(&I);
-          }
-          if (ToHoist.empty()) break;
-          for (auto *I : ToHoist)
-            I->moveBefore(Preheader->getTerminator());
-          ToHoist.clear();
+        for (Instruction &I : *BB) {
+          if (I.isTerminator())                 continue;
+          if (isa<PHINode>(I))                  continue;
+          if (I.mayHaveSideEffects())           continue;
+          if (!LInvariants.count(&I))           continue;
+          if (!isSafeToHoist(&I, L, DT))        continue;   // FIX (1)
+          ToHoist.push_back(&I);
         }
+        // Sposto: all'interno di un BB, l'ordine di iterazione preserva
+        // def-prima-di-use; tra BB diversi lo garantisce il dom-order.
+        for (Instruction *I : ToHoist)
+          I->moveBefore(Preheader->getTerminator());
       }
     }
 
     F.print(errs());
     errs() << "---\n";
 
-    return PreservedAnalyses::all();
+    // Abbiamo modificato l'IR (moveBefore + eventuale insert preheader):
+    // dichiarare 'all()' sarebbe una bugia al PassManager.
+    return PreservedAnalyses::none();
   }
 
   static bool isRequired() { return true; }
