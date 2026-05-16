@@ -19,9 +19,7 @@ using namespace llvm;
 
 namespace {
 
-// ============================================================
-//  Dominance Tree (immutato rispetto alla tua versione)
-// ============================================================
+//  Dominance Tree
 struct MyDomNode {
   BasicBlock               *BB;
   BasicBlock               *IDom;      // immediate dominator (nullptr per entry)
@@ -144,9 +142,7 @@ void printDomTree(BasicBlock       *Root,
 }
 
 
-// ============================================================
-//  Reaching Definitions (immutato)
-// ============================================================
+//  Reaching Definitions
 using DefSet   = std::set<Instruction *>;
 using ReachMap = std::map<Value *, DefSet>;
 
@@ -213,15 +209,7 @@ DefSet getReachingDefsAtUse(
 }
 
 
-// ============================================================
-//  Helper LICM: safety check + traversal order
-// ============================================================
-
-// FIX (1): un'istruzione è hoistable se
-//   (a) è safe-to-speculatively-execute (la sua esecuzione anticipata
-//       non può causare trap / observable side effect) OPPURE
-//   (b) il suo BB domina TUTTI gli exit block del loop
-//       (quindi era garantito che venisse eseguita in ogni run del loop).
+//safety check + traversal order
 static bool isSafeToHoist(Instruction *I, Loop *L, DominatorTree &DT) {
   if (isSafeToSpeculativelyExecute(I))
     return true;
@@ -234,9 +222,6 @@ static bool isSafeToHoist(Instruction *I, Loop *L, DominatorTree &DT) {
   return true;
 }
 
-// Conservativo: il loop contiene istruzioni che scrivono in memoria?
-// Usato per decidere se i load possono essere marcati invariant senza
-// alias analysis vera.
 static bool loopMayWriteMemory(Loop *L) {
   for (BasicBlock *BB : L->blocks())
     for (Instruction &I : *BB)
@@ -245,10 +230,7 @@ static bool loopMayWriteMemory(Loop *L) {
   return false;
 }
 
-// FIX (3): raccolta dei BB del loop in DFS pre-order del dominator tree.
-// Garantisce che se A domina B (entrambi nel loop), A appare prima di B.
-// Ne consegue che, hoistando in quest'ordine, ogni def viene mossa
-// prima di ogni suo use => nessun use-before-def nel preheader.
+// raccolta dei BB del loop in DFS pre-order del dominator tree
 static void collectLoopBlocksInDomOrder(
     Loop *L, DominatorTree &DT,
     std::vector<BasicBlock *> &Out)
@@ -267,9 +249,7 @@ static void collectLoopBlocksInDomOrder(
 }
 
 
-// ============================================================
-//  Loop invariant detection (FIX 2: set PER-LOOP)
-// ============================================================
+//  Loop invariant detection
 using PerLoopInvMap = std::map<Loop *, std::set<Instruction *>>;
 
 void detectLoopInvariant(
@@ -288,9 +268,7 @@ void detectLoopInvariant(
   std::set<BasicBlock *> LoopBlocks(L->block_begin(), L->block_end());
   std::set<Instruction *> &InvariantSet = PerLoopInvariants[L];
 
-  // FIX (4): determino una volta se il loop scrive in memoria.
-  // Se sì, niente load nell'invariant set (criterio conservativo
-  // in assenza di alias analysis).
+
   bool LoopWrites = loopMayWriteMemory(L);
 
   bool Changed = true;
@@ -352,9 +330,7 @@ void detectLoopInvariant(
 }
 
 
-// ============================================================
 //  Pass principale
-// ============================================================
 struct TestPass : PassInfoMixin<TestPass> {
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
@@ -364,7 +340,7 @@ struct TestPass : PassInfoMixin<TestPass> {
     LoopInfo      &LI = AM.getResult<LoopAnalysis>(F);
     DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
 
-    // --- dominance tree (custom) ---
+    // dominance tree
     errs() << "\n=== Dominance Tree ===\n";
     DomTreeMap OurDomTree = buildDominanceTree(F);
     printDomTree(&F.getEntryBlock(), OurDomTree, LI, 0);
@@ -378,7 +354,7 @@ struct TestPass : PassInfoMixin<TestPass> {
       errs() << "\n";
     }
 
-    // --- reaching definitions ---
+    // reaching definitions
     errs() << "\n=== Reaching Definitions ===\n";
     std::map<BasicBlock *, ReachMap> ReachIN, ReachOUT;
     computeReachingDefs(F, ReachIN, ReachOUT);
@@ -400,7 +376,7 @@ struct TestPass : PassInfoMixin<TestPass> {
       }
     }
 
-    // --- loop-invariant detection (PER-LOOP) ---
+    // loop-invariant detection (PER-LOOP)
     errs() << "\n=== Loop-Invariant Analysis ===\n";
     PerLoopInvMap PerLoopInvariants;
     if (LI.empty()) {
@@ -415,7 +391,7 @@ struct TestPass : PassInfoMixin<TestPass> {
              << Tot << "\n";
     }
 
-    // --- hoisting (inner-first) con safety check + dom-order traversal ---
+    // hoisting (inner-first) con safety check e dom-order traversal
     auto Loops = LI.getLoopsInPreorder();
     for (Loop *L : reverse(Loops)) {
 
@@ -441,11 +417,12 @@ struct TestPass : PassInfoMixin<TestPass> {
           if (isa<PHINode>(I))                  continue;
           if (I.mayHaveSideEffects())           continue;
           if (!LInvariants.count(&I))           continue;
-          if (!isSafeToHoist(&I, L, DT))        continue;   // FIX (1)
+          if (!isSafeToHoist(&I, L, DT))        continue;
           ToHoist.push_back(&I);
         }
-        // Sposto: all'interno di un BB, l'ordine di iterazione preserva
-        // def-prima-di-use; tra BB diversi lo garantisce il dom-order.
+        // Sposto: all'interno di un BB, l'ordine di iterazione 
+        // preserva def-prima-di-use;
+        // tra BB diversi lo garantisce il dom-order.
         for (Instruction *I : ToHoist)
           I->moveBefore(Preheader->getTerminator());
       }
@@ -455,7 +432,6 @@ struct TestPass : PassInfoMixin<TestPass> {
     errs() << "---\n";
 
     // Abbiamo modificato l'IR (moveBefore + eventuale insert preheader):
-    // dichiarare 'all()' sarebbe una bugia al PassManager.
     return PreservedAnalyses::none();
   }
 

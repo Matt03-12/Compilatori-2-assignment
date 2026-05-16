@@ -1,0 +1,3 @@
+clang++ -fPIC -shared CodeMotionPass.cpp -o libCodeMotionPass.so `llvm-config --cxxflags --ldflags --system-libs --libs core passes`
+
+opt -load-pass-plugin ./libCodeMotionPass.so     -passes=code-motion-pass     -S test/input.ll     -o test/output.ll

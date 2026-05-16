@@ -1,22 +1,3 @@
-; ============================================================
-; test_licm.ll
-; Test cases per la pass LICM custom (code-motion-pass).
-; Già in SSA, niente alloca/store di locals: niente bisogno di mem2reg.
-;
-; Esecuzione:
-;     opt -load-pass-plugin=./libTestPass.so \
-;         -passes=code-motion-pass test_licm.ll -S -o test_out.ll
-;
-; Ogni funzione esercita un aspetto preciso delle fix.
-; [ATTESO]  cosa fa la pass corretta.
-; [PRE-FIX] come si comportava la versione buggata (per contrasto).
-; ============================================================
-
-
-; ============================================================
-; 1) Baseline: add invariant, single exit.
-;    [ATTESO]  %c = add %a, %b  ->  preheader del loop.
-; ============================================================
 define i32 @f_basic_invariant(i32 %n, i32 %a, i32 %b) {
 entry:
   br label %for.cond
@@ -41,16 +22,6 @@ for.end:
 }
 
 
-; ============================================================
-; 2) FIX (1) — lato negativo.
-;    sdiv protetta da `if (b != 0)`, loop con due exit
-;    (early return + uscita naturale).
-;    Exit blocks = { %early.exit, %for.end }.
-;    %div.then non domina nessuno dei due, e sdiv con divisore
-;    non-costante non è speculative -> isSafeToHoist = false.
-;    [ATTESO]  %q = sdiv  RESTA in %div.then.
-;    [PRE-FIX] %q veniva spostata nel preheader: SIGFPE se b==0.
-; ============================================================
 define i32 @f_div_guarded_multiexit(i32 %n, i32 %a, i32 %b, i32 %max) {
 entry:
   br label %for.cond
@@ -70,7 +41,7 @@ div.check:
   br i1 %bnz, label %div.then, label %div.skip
 
 div.then:
-  %q       = sdiv i32 %a, %b                 ; <-- candidato pericoloso
+  %q       = sdiv i32 %a, %b               
   %sum.add = add i32 %sum, %q
   br label %div.skip
 
@@ -90,15 +61,7 @@ for.end:
 }
 
 
-; ============================================================
-; 3) FIX (1) — lato positivo via dominanza.
-;    do-while single-BB: %do.body è sia header che latch e domina
-;    l'unico exit %do.end. La sdiv non è speculative ma il body
-;    eseguiva comunque in ogni run -> hoist legittimo.
-;    Il check `n <= 0` esterno garantisce che entriamo nel loop
-;    solo se serve.
-;    [ATTESO]  %q = sdiv  ->  preheader del do-while.
-; ============================================================
+
 define i32 @f_div_dowhile_safe(i32 %n, i32 %a, i32 %b) {
 entry:
   %n.le.zero = icmp sle i32 %n, 0
@@ -121,13 +84,6 @@ early.zero:
 }
 
 
-; ============================================================
-; 4) FIX (1) — lato positivo via speculation.
-;    Loop con due exit (early break + naturale), ma l'invariant è
-;    un semplice add: isSafeToSpeculativelyExecute = true, quindi
-;    il check di dominanza degli exit non viene nemmeno richiesto.
-;    [ATTESO]  %c = add  ->  preheader.
-; ============================================================
 define i32 @f_multi_exit_speculative(i32 %n, i32 %a, i32 %b, i32 %t) {
 entry:
   br label %for.cond
@@ -156,17 +112,6 @@ for.end:
 }
 
 
-; ============================================================
-; 5) FIX (2) — per-loop invariant sets.
-;    %x = add %i, %k:
-;      - invariant per il loop INNER (i e k vengono da fuori inner)
-;      - NON invariant per OUTER (i è l'i.v. dell'outer, è una PHI
-;        nell'header outer e non è marcata invariant)
-;    [ATTESO]  %x  ->  preheader DELL'INNER, e basta.
-;    [PRE-FIX] %x finiva nel preheader OUTER -> use-before-def di
-;              %i (che è definita più giù in %outer.cond) -> IR
-;              malformata, verifier fail.
-; ============================================================
 define i32 @f_nested_outer_dep(i32 %N, i32 %M, i32 %k) {
 entry:
   br label %outer.cond
@@ -202,15 +147,6 @@ outer.end:
 }
 
 
-; ============================================================
-; 6) FIX (4) — load conservativo.
-;    Il puntatore %p è invariant (argomento). Sotto la vecchia
-;    logica il load %x veniva marcato invariant e hoistato. Ma
-;    nel loop c'è uno store su %q[i]: senza alias analysis non
-;    possiamo escludere q == p, quindi:
-;        loopMayWriteMemory(L) = true  -> niente load nel set.
-;    [ATTESO]  %x = load  RESTA in %for.body.
-; ============================================================
 define void @f_load_with_store(ptr %p, ptr %q, i32 %n) {
 entry:
   br label %for.cond
